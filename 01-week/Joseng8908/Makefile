@@ -1,2 +1,2 @@
 build:
-	go build -o ns_app .
+	go build -o app .
