@@ -9,14 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
 	"ossca-2026-homework/02-week/Joseng/internal/netns"
 	"ossca-2026-homework/02-week/Joseng/internal/veth"
 
-	"golang.org/x/sys/unix"
 )
 
 type createNetnsReq struct {
