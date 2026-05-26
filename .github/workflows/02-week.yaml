@@ -10,6 +10,10 @@ on:
         description: 'Submitter GitHub login under 02-week/'
         required: true
         type: string
+      pr_number:
+        description: 'PR number to test'
+        required: true
+        type: number
 
 jobs:
   test:
@@ -17,6 +21,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        if: github.event_name == 'pull_request'
+
+      - uses: actions/checkout@v6
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/head
 
       - uses: actions/setup-go@v5
         with:
@@ -89,7 +99,7 @@ jobs:
 
           NETNS_NAME="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           HOST_IF="vethci0"
-          PEER_IF="eth0"
+          PEER_IF="vethci-peer"
           HOST_IP="10.10.0.1/24"
           PEER_IP="10.10.0.2/24"
           PEER_ADDR="10.10.0.2"
