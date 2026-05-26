@@ -11,11 +11,14 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
 	"ossca-2026-homework/02-week/Joseng/internal/netns"
 	"ossca-2026-homework/02-week/Joseng/internal/veth"
+
+	vnetns "github.com/vishvananda/netns"
 )
 
 type createNetnsReq struct {
@@ -144,31 +147,58 @@ func main() {
 }
 
 func execInNetns(nsPath, path string, args []string) (int, int, error) {
-	nsFd, err := os.Open(nsPath)
-	if err != nil {
-		return 0, 0, err
+	type result struct {
+		pid int
+		err error
 	}
 
-	var filtered []string
-	for _, a := range args {
-		if a != "" {
-			filtered = append(filtered, a)
+	ch := make(chan result, 1)
+
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		origNs, err := vnetns.Get()
+		if err != nil {
+			ch <- result{err: err}
+			return
 		}
+		defer origNs.Close()
+
+		targetNs, err := vnetns.GetFromPath(nsPath)
+		if err != nil {
+			ch <- result{err: err}
+			return
+		}
+		defer targetNs.Close()
+
+		if err := vnetns.Set(targetNs); err != nil {
+			ch <- result{err: err}
+			return
+		}
+		defer vnetns.Set(origNs)
+
+		var filtered []string
+		for _, a := range args {
+			if a != "" {
+				filtered = append(filtered, a)
+			}
+		}
+
+		cmd := exec.Command(path, filtered...)
+		if err := cmd.Start(); err != nil {
+			ch <- result{err: err}
+			return
+		}
+
+		go func() { _ = cmd.Wait() }()
+		ch <- result{pid: cmd.Process.Pid}
+	}()
+
+	res := <-ch
+	if res.err != nil {
+		return 0, 0, res.err
 	}
 
-	cmd := exec.Command(path, filtered...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Netns: int(nsFd.Fd()),
-	}
-
-	if err := cmd.Start(); err != nil {
-		nsFd.Close()
-		return 0, 0, err
-	}
-
-	nsFd.Close()
-
-	go func() { _ = cmd.Wait() }()
-
-	return os.Getpid(), cmd.Process.Pid, nil
+	return os.Getpid(), res.pid, nil
 }
