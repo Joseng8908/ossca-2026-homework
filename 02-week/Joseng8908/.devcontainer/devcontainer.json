@@ -1,0 +1,8 @@
+{
+    "name": "Go Linux",
+    "image": "mcr.microsoft.com/devcontainers/go:1.26",
+    "runArgs": [
+        "--privileged"
+    ],
+    "remoteUser": "root"
+}
