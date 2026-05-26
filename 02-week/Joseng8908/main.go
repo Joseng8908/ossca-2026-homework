@@ -145,22 +145,8 @@ func main() {
 }
 
 func execInNetns(nsPath, path string, args []string) (int, int, error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	origNs, err := os.Open("/proc/self/ns/net")
+	nsFd, err := os.Open(nsPath)
 	if err != nil {
-		return 0, 0, err
-	}
-	defer origNs.Close()
-
-	targetNs, err := os.Open(nsPath)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer targetNs.Close()
-
-	if err := unix.Setns(int(targetNs.Fd()), unix.CLONE_NEWNET); err != nil {
 		return 0, 0, err
 	}
 
@@ -172,18 +158,18 @@ func execInNetns(nsPath, path string, args []string) (int, int, error) {
 	}
 
 	cmd := exec.Command(path, filtered...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Netns: int(nsFd.Fd()),
+	}
+
 	if err := cmd.Start(); err != nil {
-		_ = unix.Setns(int(origNs.Fd()), unix.CLONE_NEWNET)
+		nsFd.Close()
 		return 0, 0, err
 	}
 
-	childPID := cmd.Process.Pid
-
-	if err := unix.Setns(int(origNs.Fd()), unix.CLONE_NEWNET); err != nil {
-		return 0, 0, err
-	}
+	nsFd.Close()
 
 	go func() { _ = cmd.Wait() }()
 
-	return os.Getpid(), childPID, nil
+	return os.Getpid(), cmd.Process.Pid, nil
 }
