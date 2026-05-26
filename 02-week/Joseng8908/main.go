@@ -6,16 +6,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
 	"ossca-2026-homework/02-week/Joseng/internal/netns"
 	"ossca-2026-homework/02-week/Joseng/internal/veth"
+
+	"golang.org/x/sys/unix"
 )
 
 type createNetnsReq struct {
@@ -144,12 +148,6 @@ func main() {
 }
 
 func execInNetns(nsPath, path string, args []string) (int, int, error) {
-	nsFd, err := os.Open(nsPath)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer nsFd.Close()
-
 	var filtered []string
 	for _, a := range args {
 		if a != "" {
@@ -157,16 +155,66 @@ func execInNetns(nsPath, path string, args []string) (int, int, error) {
 		}
 	}
 
-	cmd := exec.Command(path, filtered...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Netnsfd: int(nsFd.Fd()),
+	type result struct {
+		childPID int
+		err      error
 	}
+	ch := make(chan result, 1)
 
-	if err := cmd.Start(); err != nil {
-		return 0, 0, err
+	go func() {
+		// Setns는 thread-local 연산이므로 OS thread 고정 필수.
+		runtime.LockOSThread()
+
+		origNsFd, err := unix.Open("/proc/self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			runtime.UnlockOSThread()
+			ch <- result{0, fmt.Errorf("open host ns: %w", err)}
+			return
+		}
+		defer unix.Close(origNsFd)
+
+		nsFd, err := unix.Open(nsPath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			runtime.UnlockOSThread()
+			ch <- result{0, fmt.Errorf("open target ns %s: %w", nsPath, err)}
+			return
+		}
+		defer unix.Close(nsFd)
+
+		// 이 thread를 named namespace로 진입
+		if err := unix.Setns(nsFd, unix.CLONE_NEWNET); err != nil {
+			runtime.UnlockOSThread()
+			ch <- result{0, fmt.Errorf("setns %s: %w", nsPath, err)}
+			return
+		}
+
+		// fork+exec: 자식 프로세스는 현재 thread의 namespace(= named ns) 상속
+		cmd := exec.Command(path, filtered...)
+		if err := cmd.Start(); err != nil {
+			_ = unix.Setns(origNsFd, unix.CLONE_NEWNET)
+			runtime.UnlockOSThread()
+			ch <- result{0, fmt.Errorf("start process: %w", err)}
+			return
+		}
+
+		pid := cmd.Process.Pid
+		go func() { _ = cmd.Wait() }()
+
+		// host ns로 복귀
+		if err := unix.Setns(origNsFd, unix.CLONE_NEWNET); err != nil {
+			// 복귀 실패: 오염된 thread를 pool에 반환하면 안 됨
+			ch <- result{pid, fmt.Errorf("restore host ns: %w", err)}
+			runtime.Goexit()
+			return
+		}
+
+		runtime.UnlockOSThread()
+		ch <- result{pid, nil}
+	}()
+
+	res := <-ch
+	if res.err != nil {
+		return 0, 0, res.err
 	}
-
-	go func() { _ = cmd.Wait() }()
-
-	return os.Getpid(), cmd.Process.Pid, nil
+	return os.Getpid(), res.childPID, nil
 }
